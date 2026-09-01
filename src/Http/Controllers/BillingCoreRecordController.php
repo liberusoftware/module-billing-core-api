@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Liberu\Billing\Core\Api\Http\Controllers;
 
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -11,6 +12,7 @@ use Illuminate\Support\Facades\Gate;
 use Liberu\Billing\Core\Actions\CalculateTax;
 use Liberu\Billing\Core\Actions\ConvertCurrency;
 use Liberu\Billing\Core\Actions\CreateBillingRecord;
+use Liberu\Billing\Core\Actions\DeleteBillingRecord;
 use Liberu\Billing\Core\Actions\UpdateBillingRecord;
 use Liberu\Billing\Core\Models\BillingContact;
 use Liberu\Billing\Core\Models\BillingCurrency;
@@ -27,9 +29,13 @@ final class BillingCoreRecordController extends Controller
     {
         $model = $this->model($type);
         Gate::authorize('viewAny', $model);
-        $records = $list->execute($model, $this->teamId($request), $request->integer('per_page', 25));
+        $records = $list->execute($model, $this->teamId($request), $this->pageSize($request));
 
-        return response()->json(['data' => $records->items(), 'links' => ['next' => $records->nextPageUrl(), 'prev' => $records->previousPageUrl()], 'meta' => ['current_page' => $records->currentPage(), 'last_page' => $records->lastPage()]]);
+        return response()->json([
+            'data' => collect($records->items())->map(fn (Model $record): array => $this->resource($record, $type))->values(),
+            'links' => ['next' => $records->nextPageUrl(), 'prev' => $records->previousPageUrl()],
+            'meta' => ['current_page' => $records->currentPage(), 'last_page' => $records->lastPage()],
+        ]);
     }
 
     public function store(Request $request, string $type, CreateBillingRecord $create): JsonResponse
@@ -39,7 +45,7 @@ final class BillingCoreRecordController extends Controller
         $data = $request->validate($this->rules($type));
         $data['team_id'] = $this->teamId($request);
 
-        return response()->json(['data' => $create->execute($model, $data)], 201);
+        return response()->json(['data' => $this->resource($create->execute($model, $data), $type)], 201);
     }
 
     public function convertCurrency(Request $request, ConvertCurrency $convert): JsonResponse
@@ -66,15 +72,15 @@ final class BillingCoreRecordController extends Controller
         $data = $request->validate($this->rules($type, false));
         unset($data['team_id']);
 
-        return response()->json(['data' => $update->execute($instance, $data)]);
+        return response()->json(['data' => $this->resource($update->execute($instance, $data), $type)]);
     }
 
-    public function destroy(Request $request, string $type, int $record): JsonResponse
+    public function destroy(Request $request, string $type, int $record, DeleteBillingRecord $delete): JsonResponse
     {
         $model = $this->model($type);
         $instance = $this->forCurrentTeam($model, $record, $request);
         Gate::authorize('delete', $instance);
-        $instance->delete();
+        $delete->execute($instance, $type);
 
         return response()->json(status: 204);
     }
@@ -114,6 +120,66 @@ final class BillingCoreRecordController extends Controller
     private function teamId(Request $request): int
     {
         return (int) (data_get($request->user(), 'current_team_id') ?? data_get($request->user(), 'currentTeam.id'));
+    }
+
+    private function pageSize(Request $request): int
+    {
+        return min(max((int) $request->input('page.size', $request->integer('per_page', 25)), 1), 100);
+    }
+
+    /** @return array{id: string, type: string, attributes: array<string, mixed>} */
+    private function resource(Model $record, string $type): array
+    {
+        $attributes = match ($type) {
+            'contacts' => [
+                'name' => $record->getAttribute('name'),
+                'email' => $record->getAttribute('email'),
+                'phone' => $record->getAttribute('phone'),
+                'metadata' => $record->getAttribute('metadata') ?? [],
+            ],
+            'currencies' => [
+                'code' => $record->getAttribute('code'),
+                'name' => $record->getAttribute('name'),
+                'decimal_places' => $record->getAttribute('decimal_places'),
+                'enabled' => $record->getAttribute('enabled'),
+                'exchange_rate' => $record->getAttribute('exchange_rate'),
+            ],
+            'tax-profiles' => [
+                'name' => $record->getAttribute('name'),
+                'rate' => $record->getAttribute('rate'),
+                'jurisdiction' => $record->getAttribute('jurisdiction'),
+                'inclusive' => $record->getAttribute('inclusive'),
+                'enabled' => $record->getAttribute('enabled'),
+                'threshold_amount' => $record->getAttribute('threshold_amount'),
+                'threshold_rate' => $record->getAttribute('threshold_rate'),
+            ],
+            'tax-exemptions' => [
+                'customer_id' => $record->getAttribute('customer_id'),
+                'expires_at' => $record->getAttribute('expires_at')?->toISOString(),
+                'enabled' => $record->getAttribute('enabled'),
+                'reason' => $record->getAttribute('reason'),
+            ],
+            'sequences' => [
+                'name' => $record->getAttribute('name'),
+                'prefix' => $record->getAttribute('prefix'),
+                'next_number' => $record->getAttribute('next_number'),
+            ],
+            'terms' => [
+                'name' => $record->getAttribute('name'),
+                'due_days' => $record->getAttribute('due_days'),
+                'default' => $record->getAttribute('default'),
+            ],
+            'settings' => [
+                'values' => $record->getAttribute('values') ?? [],
+            ],
+            default => [],
+        };
+
+        return [
+            'id' => (string) $record->getKey(),
+            'type' => 'billing-core-'.$type,
+            'attributes' => $attributes,
+        ];
     }
 
     private function forCurrentTeam(string $model, int $record, Request $request): object

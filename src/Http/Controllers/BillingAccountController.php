@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Gate;
 use Liberu\Billing\Core\Actions\CreateBillingAccount;
+use Liberu\Billing\Core\Actions\DeleteBillingAccount;
 use Liberu\Billing\Core\Actions\TransitionBillingAccount;
 use Liberu\Billing\Core\Actions\UpdateBillingAccount;
 use Liberu\Billing\Core\Enums\BillingAccountStatus;
@@ -24,7 +25,7 @@ final class BillingAccountController extends Controller
         $teamId = data_get($request->user(), 'current_team_id')
             ?? data_get($request->user(), 'currentTeam.id');
 
-        $accounts = $query->execute($teamId !== null ? (int) $teamId : null, (int) $request->integer('per_page', 25));
+        $accounts = $query->execute($teamId !== null ? (int) $teamId : null, min(max((int) $request->input('page.size', $request->integer('per_page', 25)), 1), 100));
 
         return response()->json([
             'data' => $accounts->getCollection()->map(fn (BillingAccount $account): array => $this->resource($account))->values(),
@@ -68,11 +69,11 @@ final class BillingAccountController extends Controller
         return response()->json(['data' => $this->resource($transition->execute($instance, BillingAccountStatus::from($data['status'])))]);
     }
 
-    public function destroy(Request $request, int $account): JsonResponse
+    public function destroy(Request $request, int $account, DeleteBillingAccount $delete): JsonResponse
     {
         $instance = $this->forCurrentTeam($request, $account);
         Gate::authorize('delete', $instance);
-        $instance->delete();
+        $delete->execute($instance);
 
         return response()->json(status: 204);
     }
